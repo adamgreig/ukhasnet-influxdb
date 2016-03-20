@@ -1,0 +1,10 @@
+[package]
+name = "ukhasnet-influxdb"
+version = "0.1.0"
+authors = ["Adam Greig <adam@adamgreig.com>"]
+
+[dependencies]
+ukhasnet-parser = "0.2.2"
+rustc-serialize = "0.3"
+hyper = "0.8.0"
+time = "0.1"
