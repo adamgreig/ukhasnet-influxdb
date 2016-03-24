@@ -1,0 +1,21 @@
+language: rust
+rust:
+  - stable
+  - beta
+  - nightly
+matrix:
+  allow_failures:
+    - rust: nightly
+cache:
+  directories:
+    - target/debug/deps
+    - target/release/deps
+before_deploy:
+  - cargo build --release --verbose
+deploy:
+  provider: releases
+  api_key: "$GITHUB_TOKEN"
+  file: "target/release/ukhasnet-influxdb"
+  skip_cleanup: true
+  on:
+    tags: true
