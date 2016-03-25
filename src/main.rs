@@ -2,16 +2,23 @@ extern crate ukhasnet_parser;
 extern crate rustc_serialize;
 extern crate hyper;
 extern crate time;
+extern crate toml;
 
 use std::str;
 use std::string::String;
 use std::io::prelude::*;
+use std::fs::File;
 use std::io::BufReader;
 use std::net::TcpStream;
+use std::env::args;
+use std::time::Duration;
+use std::thread::sleep;
+use rustc_serialize::Decodable;
 
 use rustc_serialize::json;
 use ukhasnet_parser::{parse, DataField, Packet, Done, Error, Incomplete};
 use hyper::client::Client;
+use hyper::header::{Headers, Authorization, Basic};
 
 #[derive(Debug,RustcDecodable)]
 struct SocketMessage {
@@ -24,12 +31,60 @@ struct SocketMessage {
     t: String
 }
 
-fn packet_to_influx(sm: &SocketMessage, p: &Packet) -> String {
-    let node = p.path.iter().nth(0).unwrap();
-    let mut line = String::from(
-        format!("packet,gateway={},node={} ", sm.nn, node));
+#[derive(Debug,RustcDecodable)]
+struct Config {
+    ukhasnet: UkhasnetConfig,
+    influxdb: InfluxDBConfig,
+}
 
-    line.push_str(&format!("gw_rssi={}i", sm.r));
+#[derive(Debug,RustcDecodable)]
+struct UkhasnetConfig {
+    socket: String,
+}
+
+#[derive(Debug,RustcDecodable)]
+struct InfluxDBConfig {
+    url: String,
+    username: String,
+    password: String,
+}
+
+fn read_config() -> Config {
+    let path = match args().nth(1) {
+        Some(s) => s,
+        None => panic!("Please specify path to config file.")
+    };
+
+    let mut f = match File::open(&path) {
+        Ok(f) => f,
+        Err(e) => panic!("Error opening config file '{}': {}", &path, e)
+    };
+
+    let mut s = String::new();
+    match f.read_to_string(&mut s) {
+        Ok(_) => (),
+        Err(e) => panic!("Error reading config file '{}': {}", &path, e)
+    };
+
+    let v = match toml::Parser::new(&s).parse() {
+        Some(v) => toml::Value::Table(v),
+        None => panic!("Error parsing config file '{}'", &path)
+    };
+
+    let mut decoder = toml::Decoder::new(v);
+    match Config::decode(&mut decoder) {
+        Ok(c) => c,
+        Err(e) => panic!("Error parsing config file '{}': {}", &path, e)
+    }
+}
+
+fn packet_to_influx(sm: &SocketMessage, p: &Packet) -> Result<String, String> {
+    let node = match p.path.iter().nth(0) {
+        Some(s) => s,
+        None => { return Err("No origin node name in path".to_owned()) }
+    };
+    let mut line = String::from(
+        format!("packet,gateway={},node={} gw_rssi={}i", sm.nn, node, sm.r));
 
     let mut temperature_count = 0;
     let mut voltage_count = 0;
@@ -121,58 +176,138 @@ fn packet_to_influx(sm: &SocketMessage, p: &Packet) -> String {
         }
     }
 
-    let ts = time::strptime(&sm.t, "%Y-%m-%dT%H:%M:%S.%fZ").unwrap();
-    let ts = ts.to_timespec();
+    let ts = match time::strptime(&sm.t, "%Y-%m-%dT%H:%M:%S.%fZ") {
+        Ok(ts) => ts,
+        Err(e) => { return Err(format!("Cannot parse timestamp: {}", e)) }
+    }.to_timespec();
     let ts = (ts.sec as u64) * 1000000000 + ts.nsec as u64;
     line.push_str(&format!(" {}", ts));
-    line
+
+    Ok(line)
 }
 
-fn post_influx(line: &String) {
+fn post_influx(line: &String, config: &InfluxDBConfig) -> Result<(), String> {
     let client = Client::new();
-    client.post("http://localhost:8086/write?db=ukhasnet")
-          .body(line).send().unwrap();
+    let mut headers = Headers::new();
+    headers.set(
+        Authorization(
+            Basic {
+                username: config.username.to_owned(),
+                password: Some(config.password.to_owned()),
+            }
+        )
+    );
+    match client.post(&config.url).body(line).headers(headers).send() {
+        Ok(_) => Ok(()),
+        Err(e) => Err(format!("Error posting to InfluxDB: {}", e))
+    }
+}
+
+fn update_packets_per_min(counter: &mut u32, minute: &mut i32,
+                          config: &InfluxDBConfig) {
+    let tm = time::now();
+    *counter += 1;
+    if tm.tm_min != *minute {
+        if *minute != -1 {
+            println!("Measured {} packets per minute", counter);
+            let line = format!("packets_per_minute rate={}i", counter);
+            let _ = post_influx(&line, config);
+        }
+        *minute = tm.tm_min;
+        *counter = 1;
+    }
 }
 
 fn main() {
-    let stream = TcpStream::connect("ukhas.net:3010").unwrap();
-    let mut bufstream = BufReader::new(stream);
-    loop {
-        let mut data = Vec::new();
-        match bufstream.read_until(b'}', &mut data) {
-            Ok(_) => (),
-            Err(e) => {
-                println!("Error reading from socket: {}", e);
-                break
-            }
-        }
+    // Read config file. Panic and fail out if we cannot read it.
+    let config = read_config();
 
-        let jsonstr = match str::from_utf8(&data) {
+    // Store packets processed per minute
+    let mut rate: u32 = 0;
+    let mut minute: i32 = -1;
+
+    // Keep retrying the connect-process cycle.
+    loop {
+
+        // Connect to TCP socket
+        println!("Connecting to TCP socket '{}'", config.ukhasnet.socket);
+        let socket_addr: &str = &config.ukhasnet.socket;
+        let stream = match TcpStream::connect(&socket_addr) {
             Ok(s) => s,
             Err(e) => {
-                println!("Error converting data to string: {}", e);
-                continue;
+                println!("Error connecting to socket: {}", e);
+                println!("Retrying in ten seconds...");
+                sleep(Duration::from_secs(10));
+                continue
             }
         };
-
-        let message = match json::decode::<SocketMessage>(&jsonstr) {
-            Ok(m) => m,
+        match stream.set_read_timeout(Some(Duration::from_secs(10))) {
+            Ok(_) => (),
             Err(e) => {
-                println!("Error parsing message JSON: {}", e);
-                continue;
+                println!("Error setting socket timeout: {}", e);
+                println!("Retrying socket in ten seconds...");
+                sleep(Duration::from_secs(10));
+                continue
             }
         };
+        let mut bufstream = BufReader::new(stream);
 
-        println!("[{}] ({}) {}:", message.t, message.r, message.nn);
+        // While connected, keep reading packets and processing them
+        loop {
+            let mut data = Vec::new();
 
-        let packet = match parse(&message.p) {
-            Done(_, p) => p,
-            Error(e) => {println!("Error parsing packet: {}", e); continue;},
-            Incomplete(_) => {println!("Packet data incomplete"); continue;}
-        };
+            // If we error reading from the socket, break and retry above
+            match bufstream.read_until(b'}', &mut data) {
+                Ok(_) => (),
+                Err(e) => {
+                    println!("Error reading from socket: {}", e);
+                    break
+                }
+            }
 
-        let line = packet_to_influx(&message, &packet);
-        post_influx(&line);
-        println!("{}\n", line);
+            // Errors in parsing the data don't require reconnecting
+            let jsonstr = match str::from_utf8(&data) {
+                Ok(s) => s,
+                Err(e) => {
+                    println!("Error converting data to string: {}", e);
+                    continue;
+                }
+            };
+            let message = match json::decode::<SocketMessage>(&jsonstr) {
+                Ok(m) => m,
+                Err(e) => {
+                    println!("Error parsing message JSON: {}", e);
+                    continue;
+                }
+            };
+            println!("[{}] ({}) {}: {}",
+                     message.t, message.r, message.nn, message.p);
+
+            // Parse the message into a packet
+            let packet = match parse(&message.p) {
+                Done(_, p) => p,
+                Error(e) => {println!("Error parsing packet: {}", e); continue;},
+                Incomplete(_) => {println!("Packet data incomplete"); continue;}
+            };
+
+            // Upload the packet to InfluxDB
+            let line = match packet_to_influx(&message, &packet) {
+                Ok(l) => l,
+                Err(e) => {
+                    println!("Error converting packet to Influx: {}", e);
+                    continue
+                }
+            };
+            match post_influx(&line, &config.influxdb) {
+                Ok(_) => (),
+                Err(e) => {
+                    println!("Error posting to InfluxDB: {}", e);
+                    continue
+                }
+            };
+
+            // Update how many packets we've been processing
+            update_packets_per_min(&mut rate, &mut minute, &config.influxdb);
+        }
     }
 }
