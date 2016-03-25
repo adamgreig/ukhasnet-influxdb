@@ -6,11 +6,3 @@ rust:
 matrix:
   allow_failures:
     - rust: nightly
-before_deploy:
-  - cargo build --release --verbose
-deploy:
-  provider: releases
-  api_key: "$GITHUB_TOKEN"
-  file: "target/release/ukhasnet-influxdb"
-  on:
-    tags: true
