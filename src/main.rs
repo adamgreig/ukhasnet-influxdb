@@ -270,19 +270,20 @@ fn main() {
                 }
             }
 
-            // Errors in parsing the data don't require reconnecting
+            // Errors in parsing the data into a sentence might indicate a
+            // faulty link, so break and reconnect.
             let jsonstr = match str::from_utf8(&data) {
                 Ok(s) => s,
                 Err(e) => {
                     println!("Error converting data to string: {}", e);
-                    continue;
+                    break;
                 }
             };
             let message = match json::decode::<SocketMessage>(&jsonstr) {
                 Ok(m) => m,
                 Err(e) => {
                     println!("Error parsing message JSON: {}", e);
-                    continue;
+                    break;
                 }
             };
             println!("[{}] ({}) {}: {}",
