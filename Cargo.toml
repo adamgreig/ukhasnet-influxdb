@@ -5,7 +5,7 @@ authors = ["Adam Greig <adam@adamgreig.com>"]
 readme = "README.md"
 
 [dependencies]
-ukhasnet-parser = "0.2.2"
+ukhasnet-parser = "0.2.4"
 rustc-serialize = "0.3"
 hyper = "0.8.0"
 time = "0.1"

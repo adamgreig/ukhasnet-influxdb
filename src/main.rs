@@ -93,6 +93,7 @@ fn packet_to_influx(sm: &SocketMessage, p: &Packet) -> Result<String, String> {
 
     let mut temperature_count = 0;
     let mut voltage_count = 0;
+    let mut current_count = 0;
     let mut humidity_count = 0;
     let mut pressure_count = 0;
     let mut sun_count = 0;
@@ -121,6 +122,10 @@ fn packet_to_influx(sm: &SocketMessage, p: &Packet) -> Result<String, String> {
             &DataField::Voltage(ref v) => {
                 voltage_count += 1;
                 numeric_field("voltage", &v, voltage_count, &mut line);
+            },
+            &DataField::Current(ref i) => {
+                current_count += 1;
+                numeric_field("current", &i, current_count, &mut line);
             },
             &DataField::Humidity(ref h) => {
                 humidity_count += 1;
