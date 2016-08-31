@@ -88,8 +88,8 @@ fn packet_to_influx(sm: &SocketMessage, p: &Packet) -> Result<String, String> {
         None => { return Err("No node at end of path".to_owned()) }
     };
     let mut line = String::from(
-        format!("packet,gateway={},node={},pathend={} gw_rssi={}i",
-                sm.nn, node, pathend, sm.r));
+        format!("packet,gateway={},node={},pathend={} gw_rssi={}i,node={}",
+                sm.nn, node, pathend, sm.r, node));
 
     let mut temperature_count = 0;
     let mut voltage_count = 0;
