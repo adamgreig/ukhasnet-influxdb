@@ -1,6 +1,6 @@
 extern crate ukhasnet_parser;
 extern crate rustc_serialize;
-extern crate hyper;
+extern crate reqwest;
 extern crate time;
 extern crate toml;
 
@@ -16,9 +16,9 @@ use std::thread::sleep;
 use rustc_serialize::Decodable;
 
 use rustc_serialize::json;
-use ukhasnet_parser::{parse, DataField, Packet, Done, Error, Incomplete};
-use hyper::client::Client;
-use hyper::header::{Headers, Authorization, Basic};
+use reqwest::Client;
+use reqwest::header::{Authorization, Basic};
+use ukhasnet_parser::{parse, Packet, DataField};
 
 #[derive(Debug,RustcDecodable)]
 struct SocketMessage {
@@ -103,7 +103,6 @@ fn packet_to_influx(sm: &SocketMessage, p: &Packet) -> Result<String, String> {
     let mut location_count = 0;
     let mut windspeed_count = 0;
     let mut zombie_count = 0;
-    let mut comment_count = 0;
 
     fn numeric_field(name: &str, d: &Vec<f32>, c: i32, field: &mut String) {
         let mut cc = 0;
@@ -153,21 +152,31 @@ fn packet_to_influx(sm: &SocketMessage, p: &Packet) -> Result<String, String> {
             },
             &DataField::Location(ref l) => {
                 location_count += 1;
-                line.push_str(&format!(",location_{}_latitude={}",
-                                      location_count, l.latitude));
-                line.push_str(&format!(",location_{}_longitude={}",
-                                      location_count, l.longitude));
-                match l.altitude {
-                    Some(a) => line.push_str(
+                match l.latlng {
+                    Some((latitude, longitude)) => {
+                        line.push_str(&format!(",location_{}_latitude={}",
+                                              location_count, latitude));
+                        line.push_str(&format!(",location_{}_longitude={}",
+                                              location_count, longitude));
+                    },
+                    None => ()
+                }
+                match l.alt {
+                    Some(alt) => line.push_str(
                         &format!(",location_{}_altitude={}",
-                                location_count, a)),
+                                location_count, alt)),
                     None => ()
                 }
             },
             &DataField::WindSpeed(ref w) => {
                 windspeed_count += 1;
-                line.push_str(&format!(",windspeed_{}_speed={}",
-                                      windspeed_count, w.speed));
+                match w.speed {
+                    Some(speed) => {
+                        line.push_str(&format!(",windspeed_{}_speed={}",
+                                              windspeed_count, speed));
+                    },
+                    None => ()
+                }
                 match w.bearing {
                     Some(b) => line.push_str(
                         &format!(",windspeeed_{}_bearing={}",
@@ -179,11 +188,14 @@ fn packet_to_influx(sm: &SocketMessage, p: &Packet) -> Result<String, String> {
                 zombie_count += 1;
                 line.push_str(&format!(",zombie_{}={}i", zombie_count, z));
             },
-            &DataField::Comment(ref c) => {
-                comment_count += 1;
-                line.push_str(&format!(",comment_{}=\"{}\"", comment_count, c));
-            }
         }
+    }
+
+    match p.comment {
+        Some(ref comment) => {
+            line.push_str(&format!(",message=\"{}\"", comment))
+        },
+        None => (),
     }
 
     let ts = match time::strptime(&sm.t, "%Y-%m-%dT%H:%M:%S.%fZ") {
@@ -196,24 +208,21 @@ fn packet_to_influx(sm: &SocketMessage, p: &Packet) -> Result<String, String> {
     Ok(line)
 }
 
-fn post_influx(line: &String, config: &InfluxDBConfig) -> Result<(), String> {
-    let client = Client::new();
-    let mut headers = Headers::new();
-    headers.set(
-        Authorization(
-            Basic {
-                username: config.username.to_owned(),
-                password: Some(config.password.to_owned()),
-            }
-        )
-    );
-    match client.post(&config.url).body(line).headers(headers).send() {
-        Ok(_) => Ok(()),
+fn post_influx(client: &Client, line: &str, config: &InfluxDBConfig)
+        -> Result<(), String> {
+    match client.post(&config.url)
+                .body(line)
+                .header(Authorization(Basic {
+                    username: config.username.to_owned(),
+                    password: Some(config.password.to_owned()),
+                }))
+                .send() {
+        Ok(resp) => { let _ = resp.bytes().last(); Ok(()) },
         Err(e) => Err(format!("Error posting to InfluxDB: {}", e))
     }
 }
 
-fn update_packets_per_min(counter: &mut u32, minute: &mut i32,
+fn update_packets_per_min(client: &Client, counter: &mut u32, minute: &mut i32,
                           config: &InfluxDBConfig) {
     let tm = time::now();
     *counter += 1;
@@ -221,7 +230,7 @@ fn update_packets_per_min(counter: &mut u32, minute: &mut i32,
         if *minute != -1 {
             println!("Measured {} packets per minute", counter);
             let line = format!("packets_per_minute rate={}i", counter);
-            let _ = post_influx(&line, config);
+            let _ = post_influx(client, &line, config);
         }
         *minute = tm.tm_min;
         *counter = 1;
@@ -262,6 +271,9 @@ fn main() {
         };
         let mut bufstream = BufReader::new(stream);
 
+        // Make a client to pool connections to the InfluxDB server
+        let client = Client::new().unwrap();
+
         // While connected, keep reading packets and processing them
         loop {
             let mut data = Vec::new();
@@ -296,9 +308,8 @@ fn main() {
 
             // Parse the message into a packet
             let packet = match parse(&message.p) {
-                Done(_, p) => p,
-                Error(e) => {println!("Error parsing packet: {}", e); continue;},
-                Incomplete(_) => {println!("Packet data incomplete"); continue;}
+                Ok(p) => p,
+                Err(e) => { println!("{}", e); continue; },
             };
 
             // Upload the packet to InfluxDB
@@ -309,7 +320,7 @@ fn main() {
                     continue
                 }
             };
-            match post_influx(&line, &config.influxdb) {
+            match post_influx(&client, &line, &config.influxdb) {
                 Ok(_) => (),
                 Err(e) => {
                     println!("Error posting to InfluxDB: {}", e);
@@ -318,7 +329,8 @@ fn main() {
             };
 
             // Update how many packets we've been processing
-            update_packets_per_min(&mut rate, &mut minute, &config.influxdb);
+            update_packets_per_min(&client, &mut rate, &mut minute,
+                                   &config.influxdb);
         }
     }
 }
