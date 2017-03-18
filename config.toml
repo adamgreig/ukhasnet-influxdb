@@ -1,3 +1,5 @@
+logfile = "ukhasnet-influxdb.log"
+
 [ukhasnet]
 socket = "ukhas.net:3020"
 

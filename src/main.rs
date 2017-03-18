@@ -1,3 +1,6 @@
+#[macro_use]
+extern crate log;
+extern crate fern;
 extern crate ukhasnet_parser;
 extern crate rustc_serialize;
 extern crate reqwest;
@@ -32,6 +35,7 @@ struct SocketMessage {
 struct Config {
     ukhasnet: UkhasnetConfig,
     influxdb: InfluxDBConfig,
+    logfile: String
 }
 
 #[derive(Debug,RustcDecodable)]
@@ -238,6 +242,19 @@ fn main() {
     // Read config file. Panic and fail out if we cannot read it.
     let config = read_config();
 
+    // Set up logging
+    let logger_config = fern::DispatchConfig {
+        format: Box::new(|msg: &str, lvl: &log::LogLevel, _: &log::LogLocation| {
+            format!("[{}] [{}] {}",
+                    time::now_utc().strftime("%Y-%m-%dT%H:%M:%SZ").unwrap(),
+                    lvl, msg)
+        }),
+        output: vec![fern::OutputConfig::stdout(),
+                     fern::OutputConfig::file(&config.logfile)],
+        level: log::LogLevelFilter::Info,
+    };
+    fern::init_global_logger(logger_config, log::LogLevelFilter::Info).unwrap();
+
     // Store packets processed per minute
     let mut rate: u32 = 0;
     let mut minute: i32 = -1;
@@ -246,13 +263,12 @@ fn main() {
     loop {
 
         // Connect to TCP socket
-        println!("Connecting to TCP socket '{}'", config.ukhasnet.socket);
+        info!("Connecting to TCP socket '{}'", config.ukhasnet.socket);
         let socket_addr: &str = &config.ukhasnet.socket;
         let stream = match TcpStream::connect(&socket_addr) {
             Ok(s) => s,
             Err(e) => {
-                println!("Error connecting to socket: {}", e);
-                println!("Retrying in ten seconds...");
+                error!("Error connecting to socket: {}, retrying in 10s", e);
                 sleep(Duration::from_secs(10));
                 continue
             }
@@ -260,8 +276,7 @@ fn main() {
         match stream.set_read_timeout(Some(Duration::from_secs(10))) {
             Ok(_) => (),
             Err(e) => {
-                println!("Error setting socket timeout: {}", e);
-                println!("Retrying socket in ten seconds...");
+                error!("Error setting socket timeout: {}, retrying in 10s", e);
                 sleep(Duration::from_secs(10));
                 continue
             }
@@ -279,7 +294,7 @@ fn main() {
             match bufstream.read_line(&mut data) {
                 Ok(_) => (),
                 Err(e) => {
-                    println!("Error reading from socket: {}", e);
+                    error!("Error reading from socket: {}", e);
                     break
                 }
             }
@@ -287,31 +302,31 @@ fn main() {
             let message = match json::decode::<SocketMessage>(&data) {
                 Ok(m) => m,
                 Err(e) => {
-                    println!("Error parsing message JSON: {}", e);
+                    error!("Error parsing message JSON: {}", e);
                     break;
                 }
             };
-            println!("[{}] ({}) {}: {}",
+            info!("Received packet [{}] RSSI={} GW={} {}",
                      message.t, message.r, message.nn, message.p);
 
             // Parse the message into a packet
             let packet = match parse(&message.p) {
                 Ok(p) => p,
-                Err(e) => { println!("{}", e); continue; },
+                Err(e) => { error!("Parse error: {}", e); continue; },
             };
 
             // Upload the packet to InfluxDB
             let line = match packet_to_influx(&message, &packet) {
                 Ok(l) => l,
                 Err(e) => {
-                    println!("Error converting packet to Influx: {}", e);
+                    error!("Error converting packet to Influx: {}", e);
                     continue
                 }
             };
             match post_influx(&client, &line, &config.influxdb) {
                 Ok(_) => (),
                 Err(e) => {
-                    println!("Error posting to InfluxDB: {}", e);
+                    error!("Error posting to InfluxDB: {}", e);
                     continue
                 }
             };
