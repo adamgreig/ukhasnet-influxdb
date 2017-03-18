@@ -22,12 +22,9 @@ use ukhasnet_parser::{parse, Packet, DataField};
 
 #[derive(Debug,RustcDecodable)]
 struct SocketMessage {
-    i: u32,
-    ni: u32,
     nn: String,
     p: String,
     r: i32,
-    s: String,
     t: String
 }
 
