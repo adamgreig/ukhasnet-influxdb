@@ -276,10 +276,10 @@ fn main() {
 
         // While connected, keep reading packets and processing them
         loop {
-            let mut data = Vec::new();
+            let mut data = String::new();
 
             // If we error reading from the socket, break and retry above
-            match bufstream.read_until(b'}', &mut data) {
+            match bufstream.read_line(&mut data) {
                 Ok(_) => (),
                 Err(e) => {
                     println!("Error reading from socket: {}", e);
@@ -287,16 +287,7 @@ fn main() {
                 }
             }
 
-            // Errors in parsing the data into a sentence might indicate a
-            // faulty link, so break and reconnect.
-            let jsonstr = match str::from_utf8(&data) {
-                Ok(s) => s,
-                Err(e) => {
-                    println!("Error converting data to string: {}", e);
-                    break;
-                }
-            };
-            let message = match json::decode::<SocketMessage>(&jsonstr) {
+            let message = match json::decode::<SocketMessage>(&data) {
                 Ok(m) => m,
                 Err(e) => {
                     println!("Error parsing message JSON: {}", e);
