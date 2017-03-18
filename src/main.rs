@@ -199,6 +199,8 @@ fn packet_to_influx(sm: &SocketMessage, p: &Packet) -> Result<String, String> {
         None => (),
     }
 
+    line.push_str(&format!(",sentence=\"{}\"", sm.p));
+
     let ts = match time::strptime(&sm.t, "%Y-%m-%dT%H:%M:%S.%fZ") {
         Ok(ts) => ts,
         Err(e) => { return Err(format!("Cannot parse timestamp: {}", e)) }
