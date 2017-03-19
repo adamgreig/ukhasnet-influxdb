@@ -309,8 +309,8 @@ fn main() {
                     break;
                 }
             };
-            info!("Received packet [{}] RSSI={} GW={} {}",
-                     message.t, message.r, message.nn, message.p);
+            info!("Received packet [{}] RSSI={} AGE={} GW={} {}",
+                     message.t, message.r, message.a, message.nn, message.p);
 
             // Parse the message into a packet
             let packet = match parse(&message.p) {
