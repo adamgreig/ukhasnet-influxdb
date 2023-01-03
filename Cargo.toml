@@ -1,13 +1,13 @@
 [package]
 name = "ukhasnet-influxdb"
-version = "0.2.2"
+version = "0.2.3"
 authors = ["Adam Greig <adam@adamgreig.com>"]
 readme = "README.md"
 
 [dependencies]
 ukhasnet-parser = "0.4"
 rustc-serialize = "0.3"
-reqwest = "0.4"
+reqwest = { version = "0.11", features = ["blocking"] }
 time = "0.1"
 toml = "0.1"
 fern = "0.3"

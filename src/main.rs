@@ -19,8 +19,7 @@ use std::thread::sleep;
 use rustc_serialize::Decodable;
 
 use rustc_serialize::json;
-use reqwest::Client;
-use reqwest::header::{Authorization, Basic};
+use reqwest::blocking::Client;
 use ukhasnet_parser::{parse, Packet, DataField};
 
 #[derive(Debug,RustcDecodable)]
@@ -215,13 +214,13 @@ fn packet_to_influx(sm: &SocketMessage, p: &Packet) -> Result<String, String> {
 fn post_influx(client: &Client, line: &str, config: &InfluxDBConfig)
         -> Result<(), String> {
     match client.post(&config.url)
-                .body(line)
-                .header(Authorization(Basic {
-                    username: config.username.to_owned(),
-                    password: Some(config.password.to_owned()),
-                }))
+                .body(line.to_owned())
+                .basic_auth(&config.username, Some(&config.password))
                 .send() {
-        Ok(resp) => { let _ = resp.bytes().last(); Ok(()) },
+        Ok(resp) => match resp.bytes() {
+            Ok(_) => Ok(()),
+            Err(e) => Err(format!("Error posting to InfluxDB: {}", e)),
+        },
         Err(e) => Err(format!("Error posting to InfluxDB: {}", e))
     }
 }
@@ -287,7 +286,7 @@ fn main() {
         let mut bufstream = BufReader::new(stream);
 
         // Make a client to pool connections to the InfluxDB server
-        let client = Client::new().unwrap();
+        let client = Client::new();
 
         // While connected, keep reading packets and processing them
         loop {
